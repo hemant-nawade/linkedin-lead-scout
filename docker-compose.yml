@@ -1,0 +1,19 @@
+services:
+  app:
+    build: .
+    ports: ["8000:8000"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://leadscout:leadscout@db:5432/leadscout
+    depends_on: [db]
+    restart: unless-stopped
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: leadscout
+      POSTGRES_PASSWORD: leadscout
+      POSTGRES_DB: leadscout
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    restart: unless-stopped
+volumes:
+  pgdata:
