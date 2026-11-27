@@ -1,6 +1,8 @@
 """LinkedIn Lead Scout — FastAPI app (API + dashboard)."""
 import asyncio
+import hashlib
 import csv
+import re
 import threading
 import io
 import logging
@@ -17,7 +19,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, inspect, or_, select, text
 from sqlalchemy.orm import Session
 
 from . import discovery, parsing
@@ -42,6 +44,7 @@ app = FastAPI(title=settings.APP_NAME, docs_url="/api/docs", redoc_url=None)
 @app.on_event("startup")
 def startup() -> None:
     Base.metadata.create_all(engine)
+    _migrate()
     db = SessionLocal()
     try:
         if settings.ADMIN_EMAIL and settings.ADMIN_PASSWORD and not db.scalar(select(func.count(User.id))):
@@ -52,6 +55,20 @@ def startup() -> None:
     finally:
         db.close()
     asyncio.get_event_loop().create_task(discovery.scheduler_loop(get_config, _run_discovery))
+
+
+def _migrate() -> None:
+    """Add columns introduced after the first deploy (create_all never alters existing tables)."""
+    new_cols = {"leads": [("site", "VARCHAR(30) DEFAULT 'linkedin'"), ("page_type", "VARCHAR(20) DEFAULT 'post'"),
+                          ("tag", "VARCHAR(80) DEFAULT ''")]}
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, cols in new_cols.items():
+            have = {c["name"] for c in insp.get_columns(table)}
+            for name, ddl in cols:
+                if name not in have:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+                    log.info("Migrated: added %s.%s", table, name)
 
 
 @app.middleware("http")
@@ -115,7 +132,7 @@ def user_full(u: User) -> dict:
                      "email": u.linkedin_email, "picture": u.linkedin_picture,
                      "connected_at": iso(u.linkedin_connected_at)},
         "created_at": iso(u.created_at), "last_login_at": iso(u.last_login_at),
-        "has_password": bool(u.password_hash),
+        "has_password": bool(u.password_hash), "has_scout_token": bool(u.capture_token),
     })
     return d
 
@@ -151,7 +168,10 @@ def lead_dict(lead: Lead, active_days: int, full: bool = False) -> dict:
         "added_by": user_public(lead.added_by), "owner": user_public(lead.owner),
         "captured_at": iso(lead.captured_at), "updated_at": iso(lead.updated_at),
         "tab": lead_tab(lead, active_days),
+        "site": lead.site or "linkedin", "page_type": lead.page_type or "post", "tag": lead.tag or "",
     }
+    if d["page_type"] != "post" and not lead.post_date:
+        d["age_label"] = "captured " + parsing.human_age(lead.captured_at)
     d["old_verify"] = d["tab"] == "old"
     pid = parsing.linkedin_post_id(lead.post_url)
     d["embed_url"] = f"https://www.linkedin.com/embed/feed/update/urn:li:{pid[0]}:{pid[1]}" if pid else None
@@ -525,6 +545,7 @@ def create_lead(db: Session, data: dict, user: Optional[User], source: str, cfg:
         post_age_text=a["post_age_text"], post_date=post_date, contacts=contacts,
         compliance_flag=a["compliance_flag"], compliance_terms=a["compliance_terms"],
         source=source, is_sample=is_sample, notes=data.get("notes") or "",
+        site=data.get("site") or "linkedin", page_type=data.get("page_type") or "post", tag=(data.get("tag") or "")[:80],
         added_by_id=user.id if user else None,
         owner_id=data.get("owner_id") or (user.id if user else None),
         status="New",
@@ -847,6 +868,120 @@ def clear_samples(admin: User = Depends(admin_user), db: Session = Depends(get_d
         db.query(Lead).filter(Lead.id.in_(ids)).delete(synchronize_session=False)
         db.commit()
     return {"deleted": len(ids)}
+
+
+# ======================================================================= scout session (Playwright, human-driven)
+SESSION_CAPS = {"linkedin": 60, "indiamart": 80, "tradeindia": 80, "web": 150}
+IST = timedelta(hours=5, minutes=30)
+
+
+def _hash_token(tok: str) -> str:
+    return hashlib.sha256(tok.encode()).hexdigest()
+
+
+def _ist_day_start_utc() -> datetime:
+    now_ist = utcnow() + IST
+    return now_ist.replace(hour=0, minute=0, second=0, microsecond=0) - IST
+
+
+@app.post("/api/me/scout-token")
+def new_scout_token(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    tok = "lsk_" + secrets.token_urlsafe(30)
+    user.capture_token = _hash_token(tok)
+    db.commit()
+    return {"token": tok, "server": settings.BASE_URL}
+
+
+@app.delete("/api/me/scout-token")
+def revoke_scout_token(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    user.capture_token = None
+    db.commit()
+    return {"ok": True}
+
+
+class CaptureIn(BaseModel):
+    site: str = Field(pattern="^(linkedin|indiamart|tradeindia|web)$")
+    url: str = Field(min_length=8, max_length=1000)
+    page_type: str = Field(default="page", max_length=20)
+    title: str = Field(default="", max_length=500)
+    text: str = Field(min_length=20, max_length=25000)
+    tag: str = Field(default="", max_length=80)
+    captured_by: str = Field(default="", max_length=80)
+    captured_at: Optional[str] = None
+
+
+def _session_count_today(db: Session, user_id: int, site: str) -> int:
+    return db.scalar(select(func.count(Lead.id)).where(
+        Lead.source == "session", Lead.added_by_id == user_id, Lead.site == site,
+        Lead.captured_at >= _ist_day_start_utc())) or 0
+
+
+def _clean_title(title: str) -> str:
+    t = re.sub(r"\s*[|\-–]\s*(LinkedIn|IndiaMART|TradeIndia)\s*$", "", title or "", flags=re.I).strip()
+    return re.sub(r"^\(\d+\)\s*", "", t)  # LinkedIn's "(3) " unread-count prefix
+
+
+@app.post("/api/captures")
+def receive_capture(data: CaptureIn, bg: BackgroundTasks, db: Session = Depends(get_db),
+                    authorization: str = Header(default=""), x_scout_token: str = Header(default="")):
+    tok = x_scout_token or (authorization[7:] if authorization.lower().startswith("bearer ") else "")
+    user = db.scalar(select(User).where(User.capture_token == _hash_token(tok))) if tok else None
+    if not user or not user.active or not user.approved:
+        raise HTTPException(401, "Invalid scout token. Generate one in Lead Scout → Settings → Profile.")
+    cap = SESSION_CAPS[data.site]
+    n = _session_count_today(db, user.id, data.site)
+    if n >= cap:
+        return JSONResponse(status_code=429, content={"status": "limit", "detail": f"Daily limit {cap} reached for {data.site}. Stop for today.",
+                                                      "count_today": n, "cap": cap})
+    page_type = data.page_type
+    if data.site == "linkedin" and parsing.linkedin_post_id(data.url):
+        page_type = "post"
+    title = _clean_title(data.title)
+    if page_type == "post":
+        author, head = discovery.split_title(title, data.url)
+    else:
+        author, head = (title.split(" | ")[0] if title else ""), ""
+    first_line = next((l.strip() for l in data.text.splitlines() if 3 < len(l.strip()) < 160), "")
+    cfg = get_config(db)
+    lead, dup = create_lead(db, {"post_url": data.url, "post_text": data.text.strip(), "author_name": author[:200],
+                                 "author_headline": (head or ("" if first_line == author else first_line))[:300],
+                                 "site": data.site, "page_type": page_type, "tag": data.tag}, user, "session", cfg)
+    if dup:
+        return {"status": "duplicate", "detail": dup["message"], "lead_id": dup["lead_id"], "count_today": n, "cap": cap}
+    n += 1
+    if lead.keywords or page_type != "post":
+        notif = create_notification(db, lead)
+        bg.add_task(deliver_external, notif.id)
+    return {"status": "created", "lead_id": lead.id, "page_type": page_type, "keywords": lead.keywords,
+            "intent": lead.intent, "lead_types": lead.lead_types, "count_today": n, "cap": cap,
+            "link": f"{settings.BASE_URL}/#/lead/{lead.id}"}
+
+
+@app.get("/api/session/today")
+def session_today(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    start = _ist_day_start_utc()
+    rows = db.scalars(select(Lead).where(Lead.source == "session", Lead.captured_at >= start)).unique().all()
+    per_user: dict = {}
+    for r in rows:
+        name = r.added_by.name if r.added_by else "?"
+        u = per_user.setdefault(name, {"name": name, "linkedin": 0, "indiamart": 0, "tradeindia": 0, "web": 0})
+        u[r.site or "linkedin"] = u.get(r.site or "linkedin", 0) + 1
+    all_today = db.scalars(select(Lead).where(Lead.captured_at >= start)).unique().all()
+    top = sorted(all_today, key=lambda r: (r.intent == "High", len(r.keywords or []), len(r.lead_types or [])), reverse=True)[:3]
+    tags = sorted({r.tag for r in rows if r.tag})
+    mine = {s: _session_count_today(db, user.id, s) for s in SESSION_CAPS}
+    return {"date": (utcnow() + IST).strftime("%d %b"), "caps": SESSION_CAPS, "mine": mine,
+            "members": list(per_user.values()), "new_leads": len(all_today), "session_captures": len(rows),
+            "by_site": {s: sum(1 for r in rows if (r.site or "linkedin") == s) for s in SESSION_CAPS},
+            "tags": tags, "top": [{"id": r.id, "name": r.author_name or r.post_url, "intent": r.intent,
+                                   "type": ", ".join(r.lead_types or []) or r.page_type} for r in top],
+            "has_token": bool(user.capture_token)}
+
+
+@app.get("/scout/scout_session.py")
+def download_script():
+    return FileResponse(Path(__file__).resolve().parent.parent / "scout" / "scout_session.py",
+                        media_type="text/x-python", filename="scout_session.py")
 
 
 # ======================================================================= auto-discovery

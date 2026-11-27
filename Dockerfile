@@ -5,6 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY static ./static
+COPY scout ./scout
 RUN mkdir -p /app/data && useradd -m appuser && chown -R appuser /app
 USER appuser
 EXPOSE 8000

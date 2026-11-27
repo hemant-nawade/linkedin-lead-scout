@@ -41,13 +41,14 @@ const ICONS = {
   sparkle: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   webhook: '<path d="M18 16.98h-5.99c-1.1 0-1.95.94-2.48 1.9A4 4 0 0 1 2 17c.01-.7.2-1.4.57-2M6 17l3.13-5.78c.53-.97.1-2.18-.5-3.1a4 4 0 1 1 6.89-4.06M12 6l3.13 5.73C15.66 12.7 16.9 13 18 13a4 4 0 0 1 0 8"/>',
+  terminal: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/>',
 };
 const ic = (n, cls = "") => `<svg class="i ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ""}</svg>`;
 const LI_LOGO = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M20.45 20.45h-3.56v-5.57c0-1.33-.02-3.04-1.85-3.04-1.85 0-2.14 1.45-2.14 2.94v5.67H9.35V9h3.41v1.56h.05c.48-.9 1.64-1.85 3.37-1.85 3.6 0 4.27 2.37 4.27 5.46v6.28zM5.34 7.43a2.06 2.06 0 1 1 0-4.13 2.06 2.06 0 0 1 0 4.13zM7.12 20.45H3.56V9h3.56v11.45zM22.22 0H1.77C.79 0 0 .77 0 1.73v20.54C0 23.23.79 24 1.77 24h20.45c.98 0 1.78-.77 1.78-1.73V1.73C24 .77 23.2 0 22.22 0z"/></svg>';
 
 // ------------------------------------------------------------------ state & api
 const S = { me: null, pub: null, settings: null, users: [], stats: null, notifs: { items: [], unread: 0 },
-  filters: { q: "", keyword: "", lead_type: "", intent: "", owner: "" }, page: 1, lastUnreadTop: 0, integrations: null };
+  filters: { q: "", keyword: "", lead_type: "", intent: "", owner: "", source: "" }, page: 1, lastUnreadTop: 0, integrations: null };
 
 async function api(path, opts = {}) {
   const o = { method: opts.method || "GET", headers: { Accept: "application/json" }, credentials: "same-origin" };
@@ -160,6 +161,7 @@ async function route() {
     post_url: params.get("u") || "", post_text: params.get("t") || "", author_name: params.get("a") || "",
     author_headline: params.get("h") || "", post_age_text: params.get("g") || "", author_url: params.get("au") || "", source: "capture" });
   if (p0 === "insights") return pageInsights(main);
+  if (p0 === "session") return pageSession(main);
   if (p0 === "team") return pageTeam(main);
   if (p0 === "settings") return pageSettings(main, parts[1] || "profile", params);
   go("#/");
@@ -208,7 +210,7 @@ function renderAuth(mode) {
     try {
       const r = await api(mode === "signup" ? "/api/auth/signup" : "/api/auth/login", { method: "POST", body: f, allow401: true });
       S.me = r.user; S.pub.first_run = false; shellReady = false;
-      go(sessionStorage.getItem("ls_capture") || "#/"); route();
+      go(sessionStorage.getItem("ls_capture") || "#/");
     } catch (err) {
       $("#auth-err").innerHTML = `<div class="alert err" style="margin-bottom:14px">${esc(err.message)}</div>`;
       btn.disabled = false;
@@ -259,6 +261,7 @@ function renderShell() {
       <nav class="card nav" style="padding:8px">
         <a href="#/leads/new" data-nav="leads">${ic("home")} Leads <span class="count" id="nav-new">${t.new}</span></a>
         <a href="#/add" data-nav="add">${ic("plus")} Add lead</a>
+        <a href="#/session" data-nav="session">${ic("terminal")} Scout session</a>
         <a href="#/insights" data-nav="insights">${ic("chart")} Insights</a>
         ${admin ? `<a href="#/team" data-nav="team">${ic("users")} Team ${S.users.filter((u) => !u.approved).length ? `<span class="count" style="background:#e0443e">${S.users.filter((u) => !u.approved).length}</span>` : ""}</a>` : ""}
         <a href="#/settings" data-nav="settings">${ic("gear")} Settings</a>
@@ -273,9 +276,9 @@ function renderShell() {
   </div>
   <nav class="bottom-nav">
     <a href="#/leads/new" data-nav="leads">${ic("home")}Leads</a>
-    <a href="#/insights" data-nav="insights">${ic("chart")}Insights</a>
+    <a href="#/session" data-nav="session">${ic("terminal")}Scout</a>
     <a href="#/add" data-nav="add" class="add">${ic("plus")}Add</a>
-    ${admin ? `<a href="#/team" data-nav="team">${ic("users")}Team</a>` : ""}
+    ${admin ? `<a href="#/team" data-nav="team">${ic("users")}Team</a>` : `<a href="#/insights" data-nav="insights">${ic("chart")}Insights</a>`}
     <a href="#/settings" data-nav="settings">${ic("gear")}Settings</a>
   </nav>`;
   $("#top-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { S.filters.q = e.target.value.trim(); S.page = 1; go("#/leads/all"); refreshLeads(); } });
@@ -358,6 +361,7 @@ async function pageLeads(main, tab) {
         <input class="input search" id="f-q" placeholder="Search text, author, notes" value="${esc(f.q)}">
         <select class="input" id="f-keyword"><option value="">All keywords</option>${cfg.keywords.map((k) => `<option ${f.keyword === k ? "selected" : ""}>${esc(k)}</option>`).join("")}</select>
         <select class="input" id="f-type"><option value="">All lead types</option>${S.settings.lead_types.map((k) => `<option ${f.lead_type === k ? "selected" : ""}>${esc(k)}</option>`).join("")}</select>
+        <select class="input" id="f-source"><option value="">All sources</option>${Object.entries(SOURCE_LABEL).map(([k, v]) => `<option value="${k}" ${f.source === k ? "selected" : ""}>${v}</option>`).join("")}</select>
         <select class="input" id="f-intent"><option value="">Any intent</option><option ${f.intent === "High" ? "selected" : ""}>High</option><option ${f.intent === "Normal" ? "selected" : ""}>Normal</option></select>
         <select class="input" id="f-owner"><option value="">Any owner</option><option value="me" ${f.owner === "me" ? "selected" : ""}>Mine</option>${S.users.filter((u) => u.approved !== false).map((u) => `<option value="${u.id}" ${f.owner == u.id ? "selected" : ""}>${esc(u.name)}</option>`).join("")}</select>
         ${Object.values(f).some(Boolean) ? '<button class="btn ghost sm" id="f-clear">Clear</button>' : ""}
@@ -372,9 +376,10 @@ async function pageLeads(main, tab) {
   $("#f-keyword").onchange = (e) => { S.filters.keyword = e.target.value; upd(); };
   $("#f-type").onchange = (e) => { S.filters.lead_type = e.target.value; upd(); };
   $("#f-intent").onchange = (e) => { S.filters.intent = e.target.value; upd(); };
+  $("#f-source").onchange = (e) => { S.filters.source = e.target.value; upd(); };
   $("#f-owner").onchange = (e) => { S.filters.owner = e.target.value; upd(); };
   renderDiscoveryBar();
-  const c = $("#f-clear"); if (c) c.onclick = () => { S.filters = { q: "", keyword: "", lead_type: "", intent: "", owner: "" }; pageLeads(main, currentTab); };
+  const c = $("#f-clear"); if (c) c.onclick = () => { S.filters = { q: "", keyword: "", lead_type: "", intent: "", owner: "", source: "" }; pageLeads(main, currentTab); };
   await refreshLeads();
 }
 
@@ -443,7 +448,9 @@ function highlight(text, kws) {
   return h.replace(/(^|[^&\w])(#[A-Za-z][A-Za-z0-9_]*)/g, '$1<span style="color:var(--blue-l);font-weight:600">$2</span>');
 }
 
-const SOURCE_LABEL = { manual: "Manual", capture: "1-click capture", webhook: "Vendor", sample: "Sample data", search: "Auto-discovered" };
+const SOURCE_LABEL = { manual: "Manual", capture: "1-click capture", webhook: "Vendor", sample: "Sample data", search: "Auto-discovered", session: "Scout session" };
+const PAGE_LABEL = { person: "Person profile", company: "Company page", product: "Product listing", job: "Job", page: "Web page", search: "Search page" };
+const SITE_LABEL = { indiamart: "IndiaMART", tradeindia: "TradeIndia", web: "Website", linkedin: "LinkedIn" };
 
 function postCard(l) {
   const statusOpts = S.settings.statuses.map((s) => `<option ${s === l.status ? "selected" : ""}>${s}</option>`).join("");
@@ -469,6 +476,9 @@ function postCard(l) {
       ${l.intent === "High" ? `<span class="chip high" title="${esc((l.intent_words || []).join(", "))}">${ic("bolt")} High intent</span>` : ""}
       ${l.old_verify ? '<span class="chip">Old, verify</span>' : ""}
       ${l.age_label === "Date unknown" ? '<span class="chip">Date unknown</span>' : ""}
+      ${l.page_type && l.page_type !== "post" ? `<span class="chip outline">${esc(PAGE_LABEL[l.page_type] || l.page_type)}</span>` : ""}
+      ${l.site && l.site !== "linkedin" ? `<span class="chip outline">${esc(SITE_LABEL[l.site] || l.site)}</span>` : ""}
+      ${l.tag ? `<span class="chip outline">#${esc(l.tag)}</span>` : ""}
       ${l.compliance_flag ? `<span class="chip warn" title="${esc(l.compliance_terms.join(", "))}">${ic("shield")} Compliance review</span>` : ""}
       ${(l.keywords || []).map((k) => `<span class="chip kw">${esc(k)}</span>`).join("")}
       ${(l.lead_types || []).map((t) => `<span class="chip violet">${esc(t)}</span>`).join("")}
@@ -700,6 +710,50 @@ function renderDetect(a) {
     <div class="rowk"><span>GEO</span><span>${esc(a.geo) || '<span class="dim">—</span>'}</span></div>
     <div class="rowk"><span>Post date</span><span>${a.post_date ? `${esc(fmtDate(a.post_date + "Z"))} <span class="muted small">(from ${a.post_date_source === "link" ? "post link" : "age " + esc(a.post_age_text)})</span>` : '<span class="chip">Date unknown</span>'}</span></div>
     <div class="rowk"><span>Contacts</span><span>${contacts.length ? contacts.map((x) => `<div class="small">${esc(x)}</div>`).join("") : '<span class="dim">—</span>'}</span></div>`;
+}
+
+// ------------------------------------------------------------------ scout session
+async function pageSession(main) {
+  const d = await api("/api/session/today");
+  const server = location.origin;
+  const bar = (site) => { const n = d.mine[site], c = d.caps[site]; return `<div class="bar"><span>${SITE_LABEL[site]}</span><div class="track"><div class="fill" style="width:${Math.min(100, (n / c) * 100)}%;${n >= c ? "background:var(--red)" : ""}"></div></div><span class="muted small">${n} / ${c}</span></div>`; };
+  const upd = `Date: ${d.date} | Target: ${d.tags.join(", ") || "—"}\nCaptures: LI ${d.by_site.linkedin}, IM ${d.by_site.indiamart}, TI ${d.by_site.tradeindia}, Web ${d.by_site.web} | New leads: ${d.new_leads}\nTop 3: ${d.top.map((t) => `[${t.name}, ${t.intent === "High" ? "High" : "Normal"}]`).join(" ") || "—"} | Warnings: none`;
+  main.innerHTML = `
+    <div class="page-h"><div><h1>Scout session</h1><p class="muted">Human-driven Playwright session from the Parivestra guide. You browse; press Enter to send the page here as a lead.</p></div>
+      <a class="btn sm outline" href="/scout/scout_session.py" download>${ic("download")} Download script</a></div>
+    <div class="card"><div class="card-h"><h3>How it flows</h3></div><div class="card-b">
+      <div class="flow">${["You search on LinkedIn / IndiaMART", "Open a profile, company or post", "Press Enter in the terminal", "Lead appears here, auto-tagged", "Team gets an alert"].map((t, i) => `<div class="fstep"><b>${i + 1}</b><span>${t}</span></div>`).join("")}</div></div></div>
+    <div class="grid2" style="align-items:start">
+      <div class="card"><div class="card-h"><h3>My captures today</h3><span class="tiny muted">limits reset at midnight IST</span></div><div class="card-b bars">${Object.keys(d.caps).map(bar).join("")}</div></div>
+      <div class="card"><div class="card-h"><h3>Daily update</h3><button class="btn sm ghost" id="cp-upd">${ic("copy")} Copy</button></div><div class="card-b"><div class="code" id="upd">${esc(upd)}</div><p class="tiny dim" style="margin:8px 0 0">Paste in the group at the end of the day (guide section 10). Edit "Warnings" if LinkedIn showed any.</p></div></div>
+    </div>
+    <div class="card"><div class="card-h"><h3>Team today</h3></div>
+      ${d.members.length ? `<div style="overflow-x:auto"><table class="table"><thead><tr><th>Member</th><th>LinkedIn</th><th>IndiaMART</th><th>TradeIndia</th><th>Web</th></tr></thead><tbody>${d.members.map((m) => `<tr><td><b>${esc(m.name)}</b></td><td>${m.linkedin}</td><td>${m.indiamart}</td><td>${m.tradeindia}</td><td>${m.web}</td></tr>`).join("")}</tbody></table></div>` : '<div class="card-b muted small">No session captures yet today.</div>'}</div>
+    <div class="card"><div class="card-h"><h3>${ic("terminal")} Set up on your laptop (one time)</h3></div><div class="card-b stack">
+      <ol class="steps">
+        <li><span>Install Python 3.11+ (Windows: tick "Add python.exe to PATH").</span></li>
+        <li><span>In PowerShell:<div class="code" style="margin-top:6px">mkdir smartscout-session; cd smartscout-session
+python -m venv .venv; .venv\\Scripts\\Activate.ps1
+pip install playwright requests
+python -m playwright install chromium</div></span></li>
+        <li><span>Click <b>Download script</b> (top right) and put <code>scout_session.py</code> in that folder.</span></li>
+        <li><span>Connect it to your Lead Scout account:<div id="tok-box" style="margin-top:8px">${d.has_token ? '<div class="alert info">You already have a token. Generate a new one only if you lost it (the old one stops working).</div>' : ""}<button class="btn primary sm" id="gen-tok" style="margin-top:8px">${d.has_token ? "Generate new token" : "Generate my token"}</button></div></span></li>
+        <li><span>Run a session:<div class="code" style="margin-top:6px">python scout_session.py --site linkedin --by "${esc(S.me.name.split(" ")[0].toLowerCase())}" --tag "affiliate-partners"</div>Log in to LinkedIn by hand in the window that opens. Open a post, profile or company page and press <b>Enter</b> in the terminal.</span></li>
+      </ol></div></div>
+    <div class="card"><div class="card-h"><h3>${ic("shield")} Rules</h3></div><div class="card-b grid2 small">
+      <div><b style="color:var(--green)">Do</b><ul class="rules"><li>Use your own real account, log in by hand</li><li>Keep the browser visible, drive it yourself</li><li>Capture business information only</li><li>Stop the moment LinkedIn shows a warning</li></ul></div>
+      <div><b style="color:var(--red)">Don't</b><ul class="rules"><li>Headless, stealth plugins, proxies or extra accounts</li><li>Auto-scroll, auto-click, auto-connect or auto-message</li><li>Solve or bypass CAPTCHAs</li><li>Share cookies, the profile folder, passwords or your token</li><li>Capture students or minors</li></ul></div>
+      <div class="tiny dim" style="grid-column:1/-1">Limits: 60 LinkedIn captures and 25 searches a day (our own safety numbers, not official LinkedIn figures). India's DPDP Act applies to personal data: collect only what B2B outreach needs.</div></div></div>`;
+  $("#cp-upd").onclick = () => { navigator.clipboard.writeText($("#upd").textContent); toast("Copied", "Paste it in the group", "ok"); };
+  $("#gen-tok").onclick = async () => {
+    if (d.has_token && !(await confirmBox("Generate a new token?", "Your old token will stop working on your laptop.", "Generate"))) return;
+    const r = await api("/api/me/scout-token", { method: "POST" });
+    $("#tok-box").innerHTML = `<div class="alert warn">Copy this now. It is shown only once. Don't share it.</div>
+      <div class="code" style="margin-top:8px" id="tok-cmd">setx LEADSCOUT_URL "${esc(r.server || server)}"
+setx LEADSCOUT_TOKEN "${esc(r.token)}"</div>
+      <div class="row" style="margin-top:8px"><button class="btn sm outline" id="cp-tok">${ic("copy")} Copy commands</button><span class="tiny muted">Run in PowerShell, then open a new terminal.</span></div>`;
+    $("#cp-tok").onclick = () => { navigator.clipboard.writeText($("#tok-cmd").textContent); toast("Copied", "Paste in PowerShell", "ok"); };
+  };
 }
 
 // ------------------------------------------------------------------ insights

@@ -47,7 +47,10 @@ class Lead(Base):
     contacts: Mapped[dict] = mapped_column(JSON, default=dict)  # emails, phones, links
     compliance_flag: Mapped[bool] = mapped_column(Boolean, default=False)
     compliance_terms: Mapped[list] = mapped_column(JSON, default=list)
-    source: Mapped[str] = mapped_column(String(30), default="manual")  # manual|capture|webhook|sample
+    source: Mapped[str] = mapped_column(String(30), default="manual")  # manual|capture|webhook|sample|search|session
+    site: Mapped[str] = mapped_column(String(30), default="linkedin")    # linkedin|indiamart|tradeindia|web
+    page_type: Mapped[str] = mapped_column(String(20), default="post")   # post|person|company|product|job|page
+    tag: Mapped[str] = mapped_column(String(80), default="")             # campaign tag from scout session
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(20), default="New", index=True)
     notes: Mapped[str] = mapped_column(Text, default="")
