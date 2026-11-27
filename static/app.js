@@ -345,7 +345,7 @@ async function pageLeads(main, tab) {
   const f = S.filters;
   main.innerHTML = `
     <div class="page-h"><div><h1>Leads</h1><p class="muted">Posts matching your keywords. New = last ${cfg.active_days} days by post date.</p></div>
-      <div class="row"><a class="btn sm ghost" href="/api/leads/export.csv?tab=${currentTab}">${ic("download")} Export CSV</a></div></div>
+      <div class="row"><a class="btn sm outline" id="export-btn" href="#">${ic("download")} Export to sheet</a></div></div>
     <div id="disc-bar"></div>
     ${st.sample_count ? `<div class="sample-banner">${ic("sparkle")} <span><b>Sample data</b> is loaded for the demo (${st.sample_count} posts). Remove it in Settings → Data before real use.</span></div>` : ""}
     <div class="stats">
@@ -379,6 +379,12 @@ async function pageLeads(main, tab) {
   $("#f-source").onchange = (e) => { S.filters.source = e.target.value; upd(); };
   $("#f-owner").onchange = (e) => { S.filters.owner = e.target.value; upd(); };
   renderDiscoveryBar();
+  $("#export-btn").onclick = (e) => {
+    e.preventDefault();
+    const qs = new URLSearchParams({ tab: currentTab, ...Object.fromEntries(Object.entries(S.filters).filter(([, v]) => v)) });
+    location.href = "/api/leads/export.csv?" + qs;
+    toast("Downloading sheet", "Opens in Google Sheets or Excel. Uses the current tab and filters.", "ok");
+  };
   const c = $("#f-clear"); if (c) c.onclick = () => { S.filters = { q: "", keyword: "", lead_type: "", intent: "", owner: "", source: "" }; pageLeads(main, currentTab); };
   await refreshLeads();
 }

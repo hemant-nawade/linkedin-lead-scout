@@ -33,3 +33,15 @@ def test_discovery_creates_dedupes_and_skips(monkeypatch):
         assert lead["author_name"] == "Demo User" and lead["source"] == "search"
         assert lead["embed_url"].startswith("https://www.linkedin.com/embed/feed/update/urn:li:activity:")
         assert c.get("/api/keywords/suggestions").json()["items"]
+
+
+def test_profile_link_and_export(monkeypatch):
+    from app import parsing
+    assert parsing.profile_from_post_url(
+        "https://www.linkedin.com/posts/pragati-thapa-12ab34_finance-activity-7400000000000000000-x") == \
+        "https://www.linkedin.com/in/pragati-thapa-12ab34/"
+    from app.main import app
+    with TestClient(app) as c:
+        c.post("/api/auth/login", json={"email": "a@example.com", "password": "password123"})
+        csv_text = c.get("/api/leads/export.csv?keyword=affiliate%20marketing").text
+        assert "Profile link" in csv_text and "https://www.linkedin.com/in/demo-user/" in csv_text

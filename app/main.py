@@ -535,7 +535,7 @@ def create_lead(db: Session, data: dict, user: Optional[User], source: str, cfg:
     lead = Lead(
         post_url=norm, post_text=text.strip(), author_name=(data.get("author_name") or "").strip(),
         author_headline=(data.get("author_headline") or "").strip(),
-        author_url=(data.get("author_url") or "").strip(),
+        author_url=(data.get("author_url") or "").strip() or parsing.profile_from_post_url(data["post_url"]),
         keywords=a["keywords"] or [k for k in (data.get("force_keywords") or []) if k in cfg["keywords"]],
         intent=a["intent"], intent_words=a["intent_words"],
         lead_types=data.get("lead_types") if data.get("lead_types") is not None else a["lead_types"],
@@ -623,24 +623,31 @@ def list_leads(tab: str = "new", q: str = "", keyword: str = "", lead_type: str 
 
 
 @app.get("/api/leads/export.csv")
-def export_csv(tab: str = "all", user: User = Depends(current_user), db: Session = Depends(get_db)):
+def export_csv(tab: str = "all", q: str = "", keyword: str = "", lead_type: str = "", intent: str = "",
+               owner: str = "", source: str = "", user: User = Depends(current_user), db: Session = Depends(get_db)):
     cfg = get_config(db)
-    rows = _filtered(db, cfg, tab, "", "", "", "", "", "", "", user)
+    rows = _filtered(db, cfg, tab, q.strip(), keyword, lead_type, "", intent, owner, source, user)
     buf = io.StringIO()
+    buf.write("\ufeff")  # BOM so Excel opens Hindi/emoji text correctly
     w = csv.writer(buf)
-    w.writerow(["id", "post_url", "author", "keywords", "intent", "lead_types", "vertical", "campaign_models",
-                "geo", "post_age", "post_date", "status", "owner", "added_by", "source", "compliance",
-                "emails", "phones", "captured_at", "notes", "post_text"])
+    w.writerow(["Post link", "Person / company", "Profile link", "Headline", "Post age", "Post date",
+                "Keywords", "Intent", "Lead type", "Vertical", "Campaign model", "GEO",
+                "Emails", "Phones", "WhatsApp", "Compliance", "Status", "Owner", "Source", "Page type",
+                "Captured at", "Notes", "Post text"])
     for r in rows:
         c = r.contacts or {}
-        w.writerow([r.id, r.post_url, r.author_name, "; ".join(r.keywords or []), r.intent,
-                    "; ".join(r.lead_types or []), r.vertical, "; ".join(r.campaign_models or []), r.geo,
-                    parsing.human_age(r.post_date), iso(r.post_date) or "", r.status,
-                    r.owner.name if r.owner else "", r.added_by.name if r.added_by else r.source, r.source,
-                    "Compliance review" if r.compliance_flag else "", "; ".join(c.get("emails", [])),
-                    "; ".join(c.get("phones", [])), iso(r.captured_at), r.notes, r.post_text])
-    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
-                             headers={"Content-Disposition": f"attachment; filename=leads-{tab}.csv"})
+        w.writerow([r.post_url, r.author_name, r.author_url, r.author_headline, parsing.human_age(r.post_date),
+                    (r.post_date.strftime("%Y-%m-%d %H:%M") if r.post_date else ""),
+                    ", ".join(r.keywords or []), r.intent, ", ".join(r.lead_types or []), r.vertical,
+                    ", ".join(r.campaign_models or []), r.geo, ", ".join(c.get("emails", [])),
+                    ", ".join(c.get("phones", [])), ", ".join(c.get("whatsapp", [])),
+                    "Review: " + ", ".join(r.compliance_terms or []) if r.compliance_flag else "",
+                    r.status, r.owner.name if r.owner else "", r.source, r.page_type or "post",
+                    (r.captured_at + IST).strftime("%Y-%m-%d %H:%M"), r.notes, (r.post_text or "").replace("\r", "")])
+    stamp = (utcnow() + IST).strftime("%Y-%m-%d")
+    name = f"linkedin-leads-{keyword or tab}-{stamp}.csv".replace(" ", "-")
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f"attachment; filename={name}"})
 
 
 @app.get("/api/leads/{lead_id}")

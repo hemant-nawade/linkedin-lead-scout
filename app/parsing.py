@@ -269,6 +269,13 @@ def date_from_post_id(post_id: str) -> Optional[datetime]:
     return None
 
 
+def profile_from_post_url(url: str) -> str:
+    """linkedin.com/posts/pragati-thapa-12ab34_finance-activity-… → linkedin.com/in/pragati-thapa-12ab34/
+    (the part before "_" is the author's public profile id; for company posts it's the company page id)."""
+    m = re.search(r"linkedin\.com/posts/([A-Za-z0-9\-%]+?)_", url or "")
+    return f"https://www.linkedin.com/in/{m.group(1)}/" if m else ""
+
+
 def normalize_post_url(url: str) -> str:
     url = (url or "").strip()
     if not url:
